@@ -320,24 +320,103 @@ def tune_polynomial_degree(
     X_val: np.ndarray,
     y_val: np.ndarray,
     degrees: Iterable[int] = (2, 3, 5, 8),
-) -> Tuple[int, dict, PolynomialRegressor]:
+) -> Tuple[int, dict, dict]:
+    """Fit one model per degree; return (best_degree, mse_by_degree, models_by_degree)."""
     results = {}
+    models: dict = {}
     best_degree = None
     best_mse = float("inf")
-    best_model: Optional[PolynomialRegressor] = None
 
     for degree in degrees:
         model = PolynomialRegressor(degree).fit(X_train, y_train)
         mse = mean_squared_error(y_val, model.predict(X_val))
         results[degree] = mse
+        models[degree] = model
         print(f"  degree={degree}: validation MSE = {mse:.4f}")
         if mse < best_mse:
             best_mse = mse
             best_degree = degree
-            best_model = model
 
-    assert best_degree is not None and best_model is not None
-    return best_degree, results, best_model
+    assert best_degree is not None
+    return best_degree, results, models
+
+
+def plot_all_polynomial_degrees(
+    X: np.ndarray,
+    y: np.ndarray,
+    theta_linear: np.ndarray,
+    models_by_degree: dict,
+    mse_by_degree: dict,
+    title_prefix: str,
+    file_prefix: str,
+) -> List[Path]:
+    """
+    Save one chart per polynomial degree (each vs the linear baseline),
+    plus a multi-panel figure with all degrees side by side.
+    """
+    FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    saved: List[Path] = []
+    degrees = list(models_by_degree.keys())
+
+    for degree, model in models_by_degree.items():
+        path = plot_regression(
+            X,
+            y,
+            theta_linear,
+            title=(
+                f"{title_prefix} — degree={degree} "
+                f"(val MSE={mse_by_degree[degree]:.2f})"
+            ),
+            output_path=FIGURES_DIR / f"{file_prefix}_degree_{degree}.png",
+            poly_model=model,
+            poly_label=f"polynomial degree={degree}",
+        )
+        print(f"Saved figure: {path}")
+        saved.append(path)
+
+    # Combined grid: all degrees at a glance
+    X = np.asarray(X, dtype=float).ravel()
+    y = np.asarray(y, dtype=float).ravel()
+    order = np.argsort(X)
+    Xs, ys = X[order], y[order]
+    x_line = np.linspace(Xs.min(), Xs.max(), 300)
+    y_linear = predict_linear(x_line, theta_linear)
+
+    n = len(degrees)
+    ncols = 2
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(12, 4.2 * nrows), sharex=True, sharey=True)
+    axes_flat = np.atleast_1d(axes).ravel()
+
+    for ax, degree in zip(axes_flat, degrees):
+        model = models_by_degree[degree]
+        ax.scatter(Xs, ys, alpha=0.65, s=18, label="data", edgecolors="none")
+        ax.plot(x_line, y_linear, color="C1", linewidth=1.8, label="linear")
+        ax.plot(
+            x_line,
+            model.predict(x_line.reshape(-1, 1)),
+            color="C3",
+            linewidth=2,
+            linestyle="--",
+            label=f"poly deg={degree}",
+        )
+        ax.set_title(f"degree={degree}  |  val MSE={mse_by_degree[degree]:.2f}")
+        ax.set_xlabel("Age (years)")
+        ax.set_ylabel("Average income (2020)")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8)
+
+    for ax in axes_flat[n:]:
+        ax.axis("off")
+
+    fig.suptitle(f"{title_prefix} — all polynomial degrees", fontsize=13)
+    fig.tight_layout()
+    grid_path = FIGURES_DIR / f"{file_prefix}_all_degrees.png"
+    fig.savefig(grid_path, dpi=140)
+    plt.close(fig)
+    print(f"Saved figure: {grid_path}")
+    saved.append(grid_path)
+    return saved
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +577,7 @@ def main() -> None:
     print(f"\n{'=' * 72}\nTask 5: Polynomial regression (sklearn) on full grouped data\n{'=' * 72}")
     degrees = (2, 3, 5, 8)
     print(f"Tuning polynomial degree over {degrees} ...")
-    best_degree, poly_results, best_poly = tune_polynomial_degree(
+    best_degree, poly_results, poly_models = tune_polynomial_degree(
         Xtr_f, ytr_f, Xva_f, yva_f, degrees=degrees
     )
     print(f"\nBest polynomial degree (lowest validation MSE): {best_degree}")
@@ -507,32 +586,43 @@ def main() -> None:
         f"(linear was {mse_full:.4f})"
     )
 
-    # Refit best model on train for plotting; also show linear for comparison
-    poly_path = plot_regression(
+    print("\nPlotting Task 5 charts for every degree (full data) ...")
+    plot_all_polynomial_degrees(
         X_full,
         y_full,
         theta_full,
-        title=f"Task 5: Linear vs polynomial (degree={best_degree})",
+        poly_models,
+        poly_results,
+        title_prefix="Task 5: full data",
+        file_prefix="task5_full",
+    )
+    # Keep a clear "best vs linear" figure for Task 5.4
+    best_path = plot_regression(
+        X_full,
+        y_full,
+        theta_full,
+        title=f"Task 5.4: Linear vs best polynomial (degree={best_degree})",
         output_path=FIGURES_DIR / "task5_poly_vs_linear.png",
-        poly_model=best_poly,
+        poly_model=poly_models[best_degree],
         poly_label=f"polynomial degree={best_degree}",
     )
-    print(f"Saved figure: {poly_path}")
+    print(f"Saved figure: {best_path}")
 
-    # Also show polynomial alone on the subset for completeness
+    # Also plot every degree on the subset for comparison
     print("\nPolynomial degree tuning on subset (for comparison):")
-    best_d_sub, results_sub, best_poly_sub = tune_polynomial_degree(
+    best_d_sub, results_sub, models_sub = tune_polynomial_degree(
         Xtr_s, ytr_s, Xva_s, yva_s, degrees=degrees
     )
     print(f"Best subset polynomial degree: {best_d_sub} (MSE={results_sub[best_d_sub]:.4f})")
-    plot_regression(
+    print("\nPlotting Task 5 charts for every degree (subset) ...")
+    plot_all_polynomial_degrees(
         X_sub,
         y_sub,
         theta_sub,
-        title=f"Task 5 (subset): Linear vs polynomial (degree={best_d_sub})",
-        output_path=FIGURES_DIR / "task5_subset_poly_vs_linear.png",
-        poly_model=best_poly_sub,
-        poly_label=f"polynomial degree={best_d_sub}",
+        models_sub,
+        results_sub,
+        title_prefix="Task 5: subset",
+        file_prefix="task5_subset",
     )
 
     print_discussions(mse_sub, mse_full, poly_results, best_degree)
